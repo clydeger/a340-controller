@@ -50,16 +50,6 @@
 // Status LED
 #define STATUS_LED_PIN 48  // RGB LED on many S3 boards
 
-// ==================== PWM CONFIGURATION ====================
-#define PWM_FREQ 300       // 300Hz for both solenoids
-#define PWM_RESOLUTION 12  // 12-bit = 0-4095
-#define PWM_MAX_DUTY 4095
-
-#define REAR_SPEED_SENSOR_PULSES_PER_REV 4
-#define FRONT_SPEED_SENSOR_PULSES_PER_REV 16
-#define DIFF_RATIO 4.875 // TODO: check this
-#define WHEEL_CIRCUM 2.5 // TODO: check this
-
 // ==================== WIFI CONFIGURATION ====================
 
 const char* ssid = "TransController";      // Create AP mode by default
@@ -161,8 +151,11 @@ struct DataLogger {
 // ==================== ADC ===================================
 #define CONVERSIONS_PER_PIN 5
 #define SPEED_SENSOR_TRIGGER_LEVEL 400
+#define REAR_SPEED_SENSOR_PULSES_PER_REV 4
+#define FRONT_SPEED_SENSOR_PULSES_PER_REV 16
+#define DIFF_RATIO 4.875 // TODO: check this
+#define WHEEL_CIRCUM 2.5 // TODO: check this
 
-bool adc_coversion_done = false;
 uint8_t adc_pins[] = { ENGINE_RPM_PIN, VSS_PIN, FLUID_TEMP_PIN, TPS_PIN };
 uint8_t adc_pins_count = sizeof(adc_pins) / sizeof(uint8_t);
 adc_continuous_result_t* result = NULL;
@@ -184,79 +177,78 @@ void updateValues(unsigned long* last, unsigned long* period) {
 }
 
 void adcTaskLoop(void* pvParameters) {
+  setupAdc();
+
   for (;;) {
-    if (adc_coversion_done == true) {
-      adc_coversion_done = false;
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
-      if (analogContinuousRead(&result, 0)) {
-        // analogContinuousStop();
+    if (analogContinuousRead(&result, 0)) {
+      // analogContinuousStop();
 
-        for (int i = 0; i < adc_pins_count; i++) {
-          if (result[i].pin == ENGINE_RPM_PIN) {
-            engine_rpm_raw = (engine_rpm_raw * 3 + result[i].avg_read_raw) >> 2;
-            if (engine_rpm_raw > SPEED_SENSOR_TRIGGER_LEVEL && engine_rpm_inc) {
-              engine_rpm_inc = false;
-              updateValues(&engine_rpm_pulse_period, &engine_rpm_last_pulse);
-              if (engine_rpm_pulse_period > 0 && engine_rpm_pulse_period < 100000) {
-                float freq_hz = 1000000.0 / engine_rpm_pulse_period;
-                sensors.engine_rpm = (int)(freq_hz * 60.0 / FRONT_SPEED_SENSOR_PULSES_PER_REV);
-              } else if (micros() - engine_rpm_last_pulse > 500000) {
-                sensors.engine_rpm = 0;
-              }
-              sensors.engine_rpm = constrain(sensors.engine_rpm, 0, 8000);
-            } else if (engine_rpm_raw < SPEED_SENSOR_TRIGGER_LEVEL && !engine_rpm_inc) {
-              engine_rpm_inc = true;
+      for (int i = 0; i < adc_pins_count; i++) {
+        if (result[i].pin == ENGINE_RPM_PIN) {
+          engine_rpm_raw = (engine_rpm_raw * 3 + result[i].avg_read_raw) >> 2;
+          if (engine_rpm_raw > SPEED_SENSOR_TRIGGER_LEVEL && engine_rpm_inc) {
+            engine_rpm_inc = false;
+            updateValues(&engine_rpm_pulse_period, &engine_rpm_last_pulse);
+            if (engine_rpm_pulse_period > 0 && engine_rpm_pulse_period < 100000) {
+              float freq_hz = 1000000.0 / engine_rpm_pulse_period;
+              sensors.engine_rpm = (int)(freq_hz * 60.0 / FRONT_SPEED_SENSOR_PULSES_PER_REV);
+            } else if (micros() - engine_rpm_last_pulse > 500000) {
+              sensors.engine_rpm = 0;
             }
-          } else if (result[i].pin == VSS_PIN) {
-            vss_raw = (vss_raw * 3 + result[i].avg_read_raw) >> 2;
-            if (vss_raw > SPEED_SENSOR_TRIGGER_LEVEL && vss_inc) {
-              vss_raw = false;
-              updateValues(&vss_pulse_period, &vss_last_pulse);
-              if (vss_pulse_period > 0 && vss_pulse_period < 1000000) {
-                float freq_hz = 1000000.0 / vss_pulse_period;
-                int speed = (int)(freq_hz * 3.6 * WHEEL_CIRCUM / (DIFF_RATIO * REAR_SPEED_SENSOR_PULSES_PER_REV));
-                sensors.speed_filtered = (sensors.speed_filtered * 7 + speed) >> 3; // exponential moving average of 15 periods
-              } else if (micros() - vss_last_pulse > 1000000) {
-                sensors.speed_filtered = 0;
-              }
-              sensors.vehicle_speed_kmh = constrain(sensors.speed_filtered, 0, 250);
-            } else if (vss_raw < SPEED_SENSOR_TRIGGER_LEVEL && !vss_inc) {
-              vss_raw = true;
+            sensors.engine_rpm = constrain(sensors.engine_rpm, 0, 8000);
+          } else if (engine_rpm_raw < SPEED_SENSOR_TRIGGER_LEVEL && !engine_rpm_inc) {
+            engine_rpm_inc = true;
+          }
+        } else if (result[i].pin == VSS_PIN) {
+          vss_raw = (vss_raw * 3 + result[i].avg_read_raw) >> 2;
+          if (vss_raw > SPEED_SENSOR_TRIGGER_LEVEL && vss_inc) {
+            vss_raw = false;
+            updateValues(&vss_pulse_period, &vss_last_pulse);
+            if (vss_pulse_period > 0 && vss_pulse_period < 1000000) {
+              float freq_hz = 1000000.0 / vss_pulse_period;
+              int speed = (int)(freq_hz * 3.6 * WHEEL_CIRCUM / (DIFF_RATIO * REAR_SPEED_SENSOR_PULSES_PER_REV));
+              sensors.speed_filtered = (sensors.speed_filtered * 7 + speed) >> 3; // exponential moving average of 15 periods
+            } else if (micros() - vss_last_pulse > 1000000) {
+              sensors.speed_filtered = 0;
             }
-          } else if (result[i].pin == TPS_PIN) {
-            sensors.tps_raw = result[i].avg_read_raw;
-            //TODO: calibrate to get full 0-100% range
-            int tps_percent = map(sensors.tps_raw, 0, 4095, 0, 100);
-            tps_percent = constrain(tps_percent, 0, 100);
-            sensors.throttle_percent = (sensors.throttle_percent * 3 + tps_percent) >> 2; // exponential moving average of 7 periods
-          } else if (result[i].pin == FLUID_TEMP_PIN) {
-            sensors.fluid_raw = result[i].avg_read_raw;
-            //TODO: provide converserion to get temperature from ADC value
-            float voltage = sensors.fluid_raw * 3.3 / 4095.0;  // Note: 3.3V reference!
-            sensors.fluid_temp_c = (int)((voltage - 0.5) * 100);
-            sensors.fluid_temp_c = constrain(sensors.fluid_temp_c, -40, 150);
+            sensors.vehicle_speed_kmh = constrain(sensors.speed_filtered, 0, 250);
+          } else if (vss_raw < SPEED_SENSOR_TRIGGER_LEVEL && !vss_inc) {
+            vss_raw = true;
+          }
+        } else if (result[i].pin == TPS_PIN) {
+          sensors.tps_raw = result[i].avg_read_raw;
+          //TODO: calibrate to get full 0-100% range
+          int tps_percent = map(sensors.tps_raw, 0, 4095, 0, 100);
+          tps_percent = constrain(tps_percent, 0, 100);
+          sensors.throttle_percent = (sensors.throttle_percent * 3 + tps_percent) >> 2; // exponential moving average of 7 periods
+        } else if (result[i].pin == FLUID_TEMP_PIN) {
+          sensors.fluid_raw = result[i].avg_read_raw;
+          //TODO: provide converserion to get temperature from ADC value
+          float voltage = sensors.fluid_raw * 3.3 / 4095.0;  // Note: 3.3V reference!
+          sensors.fluid_temp_c = (int)((voltage - 0.5) * 100);
+          sensors.fluid_temp_c = constrain(sensors.fluid_temp_c, -40, 150);
 
-            if (sensors.fluid_temp_c > stats.max_temp_c) {
-              stats.max_temp_c = sensors.fluid_temp_c;
-            }
+          if (sensors.fluid_temp_c > stats.max_temp_c) {
+            stats.max_temp_c = sensors.fluid_temp_c;
           }
         }
-
-        // analogContinuousStart();
-      } else {
-        Serial.println("Error occurred during reading data. Set Core Debug Level to error or lower for more information.");
       }
+
+      // analogContinuousStart();
+    } else {
+      Serial.println("Error occurred during reading data. Set Core Debug Level to error or lower for more information.");
     }
   }
 }
 
 void ARDUINO_ISR_ATTR adcComplete() {
-  adc_coversion_done = true;
+  xTaskNotifyGive(adc_task);
 }
 
 void setupAdc() {
-  xTaskCreatePinnedToCore(adcTaskLoop, "ADC-Task", 10000, NULL, 1, &adc_task, 0);
-
+  Serial.println("setting up adc...")
   analogContinuousSetWidth(12);
   analogContinuousSetAtten(ADC_11db);
   analogContinuous(adc_pins, adc_pins_count, CONVERSIONS_PER_PIN, 20000, &adcComplete);
@@ -264,6 +256,10 @@ void setupAdc() {
 }
 
 // ==================== PWM CONTROL (ESP32-S3 LEDC) ====================
+#define PWM_FREQ 300       // 300Hz for both solenoids
+#define PWM_RESOLUTION 12  // 12-bit = 0-4095
+#define PWM_MAX_DUTY 4095
+
 void setupPWM() {
   ledcAttach(SLU_PIN, PWM_FREQ, PWM_RESOLUTION);
   ledcAttach(SLN_PIN, PWM_FREQ, PWM_RESOLUTION);
@@ -705,7 +701,6 @@ void closeDataLogger() {
 }
 
 // ==================== INITIALIZATION ====================
-
 void initTransmission() {
   trans_state.current_gear = 1;
   trans_state.target_gear = 1;
@@ -738,10 +733,8 @@ void initTransmission() {
 }
 
 // ==================== SETUP ====================
-
 void setup() {
   Serial.begin(115200);
-  delay(1000);
 
   Serial.println("\n\n====================================");
   Serial.println("A340E Controller - ESP32-S3");
@@ -755,16 +748,13 @@ void setup() {
   pinMode(SLN_PIN, OUTPUT);
   pinMode(STATUS_LED_PIN, OUTPUT);
 
-  // Analog inputs (ESP32-S3 ADC doesn't need pinMode)
-  analogSetAttenuation(ADC_11db);  // 0-3.3V range for all ADC pins
-
   //TODO: need to change the defaults for these
   pinMode(BRAKE_PIN, INPUT_PULLDOWN);
   pinMode(OD_SWITCH_PIN, INPUT_PULLDOWN);
   pinMode(MODE_SWITCH_PIN, INPUT_PULLUP);
 
   setupPWM();
-  setupAdc();
+  xTaskCreatePinnedToCore(adcTaskLoop, "ADC-Task", 10000, NULL, 1, &adc_task, 0);
 
   // Initialize transmission
   initTransmission();
@@ -802,7 +792,6 @@ void setup() {
 }
 
 // ==================== MAIN LOOP ====================
-
 void loop() {
   // Read all sensors
   readSensors();
@@ -867,7 +856,6 @@ void printStatus() {
 }
 
 // ==================== SERIAL COMMANDS ====================
-
 void processSerialCommands() {
   if (!Serial.available()) return;
 
@@ -990,7 +978,7 @@ void printDiagnostics() {
   Serial.print("Clients: ");
   Serial.println(WiFi.softAPgetStationNum());
 
-Serial.println("================================\n");
+  Serial.println("================================\n");
 }
 
 void resetAdaptiveLearning() {
